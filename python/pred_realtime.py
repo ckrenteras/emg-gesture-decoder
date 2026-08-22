@@ -1,0 +1,199 @@
+import serial
+import csv
+import os
+import joblib
+import json
+import pandas as pd
+from scipy.stats import median_abs_deviation
+from scipy.signal import butter, sosfilt
+from train_offline_models import (
+    adc_to_volts, evaluate_model, CALIBRATION_Z_CLIP,
+    SAMPLE_RATE, LOW_PASS_FREQ, HIGH_PASS_FREQ,
+)
+import numpy as np
+
+import tkinter as tk
+
+
+SERIAL_PORT = "/dev/cu.usbmodem202636001"
+BAUD_RATE = 115200
+MODEL_PATH = os.path.join('..', 'models', 'v1', 'rf_v1.pkl')
+FEATURE_COL_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'feature_columns.json')
+CLASS_MAPPING_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'class_mapping.json')
+AMP_FEATURE_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'amp_feature_columns.json')
+WINDOW_SIZE = 400
+STEP_SIZE = 200
+NUM_WINDOWS_FOR_VOTE = 10
+BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE 
+CALIBRATION_SAMPLES = 10000 # first 5 seconds
+PRED_HISTORY_SIZE = 1
+FILTER_ORDER = 3
+
+
+GESTURE_DISPLAY_MAPPING = {
+    "open_hand": "Open hand",
+    "rest": "Rest",
+    "fist": "Fist",
+    "index": "Index"
+}
+
+# to avoid transient at each step filter 
+# one sample at a time with the filter's state (zi) carried forward
+SOS_LOWPASS = butter(N=FILTER_ORDER, Wn=LOW_PASS_FREQ, fs=SAMPLE_RATE, btype='lowpass', output='sos')
+SOS_HIGHPASS = butter(N=FILTER_ORDER, Wn=HIGH_PASS_FREQ, fs=SAMPLE_RATE, btype='highpass', output='sos')
+zi_lowpass = np.zeros((SOS_LOWPASS.shape[0], 2))
+zi_highpass = np.zeros((SOS_HIGHPASS.shape[0], 2))
+
+def filter_sample(adc_value):
+    global zi_lowpass, zi_highpass
+    voltage = adc_to_volts(np.array([adc_value], dtype=float))
+    low, zi_lowpass = sosfilt(SOS_LOWPASS, voltage, zi=zi_lowpass)
+    high, zi_highpass = sosfilt(SOS_HIGHPASS, low, zi=zi_highpass)
+    return float(high[0])
+
+# connect to port
+print(f'Connecting to Teensy at port: {SERIAL_PORT}')
+ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+
+# open saved model + info
+with open(MODEL_PATH, 'rb') as file:
+    model = joblib.load(file)
+with open(FEATURE_COL_PATH, 'r') as file:
+    feature_cols = json.load(file)
+with open(CLASS_MAPPING_PATH, 'r') as file:
+    class_mapping = json.load(file)
+with open(AMP_FEATURE_PATH, 'r') as file:
+    amplitude_feature_cols = json.load(file)
+
+# ======== baseline calibration =========
+
+def get_rest_stats(feature_df, amplitude_cols=amplitude_feature_cols):
+    rest_median = feature_df[amplitude_cols].median()
+    rest_mad = feature_df[amplitude_cols].apply(
+        lambda s: median_abs_deviation(s, scale='normal', nan_policy='omit')
+    )
+    return rest_median, rest_mad
+
+def apply_baseline_calibration(feature_df, rest_median, rest_mad,
+                               amplitude_cols=amplitude_feature_cols, eps=1e-8, clip=CALIBRATION_Z_CLIP):
+    calibrated_df = feature_df.copy()
+    z = (calibrated_df[amplitude_cols] - rest_median) / (rest_mad + eps)
+    calibrated_df[amplitude_cols] = z.clip(-clip, clip)
+    return calibrated_df
+
+# get pred based off of realtime data
+
+def get_features(emg_data, feature_cols=feature_cols):
+    """emg_data must already be filtered (see filter_sample), this only windows
+    and computes amplitude/shape features, it does no filtering itself."""
+    df = pd.DataFrame({'emg': np.asarray(emg_data)})
+    windowed_rms_col = df["emg"].pow(2).rolling(window=WINDOW_SIZE, step=STEP_SIZE).mean().pow(0.5)
+    windowed_wfl_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(lambda x: np.abs(np.diff(x)).sum())
+    windowed_stdev_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).std()
+    windowed_mav_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(lambda x: np.abs(x).mean())
+    windowed_min_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(lambda x: np.abs(x).min())
+    windowed_max_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(lambda x: np.abs(x).max())
+    def crossings(s): 
+        return (s.shift(1) * s < 0)
+    windowed_zc_col = crossings(df['emg']).rolling(window=WINDOW_SIZE, step=STEP_SIZE).sum()
+    feature_df = pd.DataFrame({"RMS": windowed_rms_col,
+                               "waveform_len": windowed_wfl_col,
+                               "MAV": windowed_mav_col,
+                               "max_abs": windowed_max_col,
+                               "min_abs": windowed_min_col,
+                               "zero_crossings": windowed_zc_col,
+                               "std": windowed_stdev_col})
+    feature_df = feature_df.dropna()
+    return feature_df
+
+def get_pred(model, features):
+    if len(features) == 0:
+        return None, None, None
+
+    pred_probs = model.predict_proba(features)
+    mean_pred_probs = np.mean(pred_probs, axis=0)
+
+    best_idx = np.argmax(mean_pred_probs)
+
+    pred = int(model.classes_[best_idx])
+    prob = mean_pred_probs[best_idx]
+
+    return pred, prob, mean_pred_probs
+
+
+def class_to_gesture(class_num, class_mapping=class_mapping):
+    if str(class_num) not in class_mapping:
+        raise ValueError(f'Unexpected class_num: {class_num}')
+
+    return class_mapping[str(class_num)]
+
+def gesture_to_display_name(gesture, gesture_display_mapping=GESTURE_DISPLAY_MAPPING):
+    if str(gesture) not in gesture_display_mapping:
+        raise ValueError(f'Unexpected gesture: {gesture}')
+    return gesture_display_mapping[str(gesture)]
+
+
+def main():
+    root = tk.Tk()
+    root.title("Prediction Display")
+    root.geometry("1200x800")
+    root.configure(bg='black')
+    try:
+        calibration_data = []
+        running_data = []
+        calibration_done = False
+        print("Calibrating...")
+        label = tk.Label(root, text="Calibrating...", font=('Helvatica', 90, "bold"), 
+                         relief="flat", bg="black")
+        label.pack(expand=True) 
+        label_bottom = tk.Label(root, font=('Helvatica', 15), relief="flat", bg="black")
+        root.update()
+        while True:
+            root.update()
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if not line:
+                continue
+            if line == 'adc':
+                continue
+            try:
+                adc_value = int(line)
+            except ValueError:
+                print(f"Skipping malformed line: {line}")
+                continue
+            filtered_value = filter_sample(adc_value)
+            if not calibration_done:
+                calibration_data.append(filtered_value)
+
+                if len(calibration_data) >= CALIBRATION_SAMPLES:
+                    calibration_features = get_features(calibration_data)
+                    rest_median, rest_mad = get_rest_stats(calibration_features)
+                    calibration_done = True
+
+                    ser.reset_input_buffer()
+                    label.config(text="Calibration Complete")
+                    print("Calibration complete.")
+
+                    continue
+            else:
+                running_data.append(filtered_value)
+                if len(running_data) >= BUFFER_SIZE:
+                    features = get_features(running_data)
+                    cal_df = apply_baseline_calibration(features, rest_median, rest_mad)
+                    features = cal_df[feature_cols].to_numpy()
+                    pred, prob, mean_probs = get_pred(model, features)
+                    if  pred is not None:
+                        pred_gesture = class_to_gesture(pred)
+                        display_gesture = gesture_to_display_name(pred_gesture)
+                        label.config(text=f"{display_gesture}")
+                        prob_as_percent = prob * 100
+                        label_bottom.config(text=f"Confidence: {prob_as_percent:.2f}%")
+                        label_bottom.pack(side="bottom", pady=40)
+                        print(f"Prediction: {pred_gesture} | Confidence: {prob}")
+                    running_data = running_data[STEP_SIZE:]
+
+    except KeyboardInterrupt:
+        print('\n Logging stopped')
+    finally:
+        ser.close()
+if __name__ == "__main__":
+    main()
