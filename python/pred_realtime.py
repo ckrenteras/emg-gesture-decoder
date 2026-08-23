@@ -23,9 +23,9 @@ CLASS_MAPPING_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'class_mapping.js
 AMP_FEATURE_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'amp_feature_columns.json')
 WINDOW_SIZE = 400
 STEP_SIZE = 200
-NUM_WINDOWS_FOR_VOTE = 10
-BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE 
-CALIBRATION_SAMPLES = 10000 # first 5 seconds
+NUM_WINDOWS_FOR_VOTE = 5 # for now
+BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE  # for now
+CALIBRATION_SAMPLES = 10400 # first 5 seconds, drop first window
 PRED_HISTORY_SIZE = 1
 FILTER_ORDER = 3
 
@@ -165,7 +165,7 @@ def main():
                 calibration_data.append(filtered_value)
 
                 if len(calibration_data) >= CALIBRATION_SAMPLES:
-                    calibration_features = get_features(calibration_data)
+                    calibration_features = get_features(calibration_data[400:])
                     rest_median, rest_mad = get_rest_stats(calibration_features)
                     calibration_done = True
 

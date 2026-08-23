@@ -22,7 +22,7 @@ WINDOW = 400
 STEP = 200
 
 # ====== dataset consts =======
-TRIALS = range(1, 26) 
+TRIALS = range(1, 33) 
 CLASSES = [0, 1, 2, 4]
 BITS = 10
 VREF = 3.7
@@ -70,8 +70,9 @@ def get_feature_df(df, read_trials=range(1, 9), classes=range(0, 5), filter=True
                    order=3, fs=SAMPLE_RATE, hpf=HIGH_PASS_FREQ, lpf=LOW_PASS_FREQ):
     df = df.copy()
     df['emg'] = df['adc'].apply(lambda x: adc_to_volts(x))
-    low_passed_df = filter_emg(df, cutoff=lpf, fs=fs, butter_order=order, filter_type='lowpass')
-    df = filter_emg(low_passed_df, cutoff=hpf, fs=fs, butter_order=order, filter_type='highpass')
+    if filter:
+         low_passed_df = filter_emg(df, cutoff=lpf, fs=fs, butter_order=order, filter_type='lowpass')
+         df = filter_emg(low_passed_df, cutoff=hpf, fs=fs, butter_order=order, filter_type='highpass')
     df['trial_mask'] = df['trial'].apply(lambda x: x in read_trials)
     df = df[df['trial_mask']]
     df['class_mask'] = df["class"].apply(lambda x: x in classes)
@@ -176,7 +177,9 @@ def train_log_reg(df, feature_cols=FEATURE_COLS):
 
 def train_rf(df, feature_cols=FEATURE_COLS):
      features, labels = get_df_features_labels(df, feature_cols)
-     rf = RandomForestClassifier(n_estimators=100, max_depth=10)
+     rf = RandomForestClassifier(n_estimators=100, max_depth=5, 
+                                 min_samples_leaf=20, oob_score=True,
+                                 random_state=0)
      rf.fit(features, labels)
      return rf
 
@@ -216,14 +219,10 @@ def save_performance_metrics(train_results, test_results, classes, classifier_ty
     del test_clean['preds']
     train_confusion_matrix = train_clean.pop('confusion_matrix', None)
     test_confusion_matrix = test_clean.pop('confusion_matrix', None)
-    if (classifier_type == 'rf'):
-            train_confusion_path = os.path.join(results_dir, 'rf_train_confusion_matrix_' + tag + '.npy')
-            test_confusion_path = os.path.join(results_dir, 'rf_test_confusion_matrix_' + tag + '.npy')
-            results_path = os.path.join(results_dir, f'rf_sumary_results_{tag}.csv')
-    else: 
-            train_confusion_path = os.path.join(results_dir, 'train_confusion_matrix_' + tag + '.npy')
-            test_confusion_path = os.path.join(results_dir, 'test_confusion_matrix_' + tag + '.npy')
-            results_path = os.path.join(results_dir, f'sumary_results_{tag}.csv')
+ 
+    train_confusion_path = os.path.join(results_dir, classifier_type + '_train_confusion_matrix_' + tag + '.npy')
+    test_confusion_path = os.path.join(results_dir, classifier_type + '_test_confusion_matrix_' + tag + '.npy')
+    results_path = os.path.join(results_dir, classifier_type + f'_sumary_results_{tag}.csv')
     np.save(train_confusion_path, train_confusion_matrix)
     np.save(test_confusion_path, test_confusion_matrix)
 
@@ -235,7 +234,7 @@ def save_performance_metrics(train_results, test_results, classes, classifier_ty
 # ========= runner ========
 
 def main():
-    test_trials = [10, 14, 17, 21, 24]
+    test_trials = [23, 24, 30, 14, 15]
     train_trials = [t for t in TRIALS if t not in test_trials]
     train_feature, test_feature = get_train_test_df( data_path=DATA_PATH,
                                                     train_trials=train_trials,
@@ -251,7 +250,7 @@ def main():
     save_performance_metrics(train_results, test_results, CLASSES)
 
 
-    model_path = os.path.join("..", "models", "v1", "log_red_v1.pkl")
+    model_path = os.path.join("..", "models", "v1", "log_reg_v1.pkl")
     v1_path = os.path.dirname(model_path)
     class_mapping_path = os.path.join(v1_path, "class_mapping.json")
     features_path = os.path.join(v1_path, "feature_columns.json")
@@ -276,8 +275,6 @@ def main():
     rf_model_path = os.path.join("..", "models", "v1", "rf_v1.pkl")
     with open(rf_model_path, "wb") as file:
         pickle.dump(rf, file)
-    
-
 
 if __name__ == "__main__":
     main()
