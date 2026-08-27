@@ -30,7 +30,7 @@ void remove_first_n(int *arr, int *current_size, int n) {
     *current_size = remaining;
 }
 
-float sum_first_nvoid(int *arr, int num_sum, float sum) {
+float sum_first_n(int *arr, int num_sum, float sum) {
     int n = 0;
     if (num_sum <= n) {
         return sum;
@@ -38,64 +38,52 @@ float sum_first_nvoid(int *arr, int num_sum, float sum) {
     else {
         sum += arr[n];
         n++;
-        sum_first_nvoid(arr, num_sum, sum);
+        sum_first_n(arr, num_sum, sum);
     }
 }
+
 
 
 class RealtimeFeatureExtractor {
 private:
     size_t window_size;
-    std::vector<double> buffer;
-    size_t head = 0;
-    size_t count = 0;
-    double sum = 0.0;
-    double sq_sum = 0.0; // Sum of squares for variance
+    size_t step;
+    std::vector<float> buffer;
+    size_t write_index = 0;
+    size_t filled_samples = 0;
 
 public:
-    explicit RealtimeFeatureExtractor(size_t k, size_t step) : window_size(k), buffer(k, 0.0) {}
+    RealtimeFeatureExtractor(size_t window_size, size_t step) 
+        : window_size(window_size), 
+          step(step), 
+          buffer(window_size, 0.0f) {}
 
-    // Call this function for every new incoming real-time sample
-    void update(double newValue) {
-        if (count < window_size) {
-            buffer[head] = newValue;
-            sum += newValue;
-            sq_sum += newValue * newValue;
-            count++;
-        } else {
-            // Remove oldest step values from running totals
-            double oldValue = buffer[head];
-            sum -= oldValue;
-            sq_sum -= oldValue * oldValue;
-
-            // Insert new value
-            buffer[head] = newValue;
-            sum += newValue;
-            sq_sum += newValue * newValue;
+    // feed incoming data chunk by chunk,
+    // return true if we've fillwed the window
+    bool update(float incoming_sample, std::vector<float>& out_frame) {
+        buffer[write_index] = incoming_sample;
+        write_index = (write_index + 1) % window_size;
+        
+        if (filled_samples < window_size) {
+            filled_samples++;
+            return false; // first window not yet filled
         }
-
-        // Advance circular buffer head index
-        head = (head + 1) % window_size;
+        return true; 
     }
 
-    double getMean() const {
-        if (count == 0) return 0.0;
-        return sum / count;
-    }
-
-    double getVariance() const {
-        if (count <= 1) return 0.0;
-        double mean = getMean();
-        // Variance formula: E[X^2] - (E[X])^2
-        double var = (sq_sum / count) - (mean * mean);
-        return var < 0.0 ? 0.0 : var; // Avoid negative float errors
-    }
-
-    double getStandardDeviation() const {
-        return std::sqrt(getVariance());
-    }
-    
-    bool isReady() const {
-        return count == window_size;
+    // Block-based real-time update (more efficient)
+    bool push_block(const std::vector<float>& input_block, std::vector<std::vector<float>>& extracted_frames) {
+        for (float sample : input_block) {
+            buffer[write_index] = sample;
+            write_index = (write_index + 1) % window_size;
+            
+            if (filled_samples < window_size) {
+                filled_samples++;
+            } else {
+                // When buffer wraps or hits hop cadence, reorder and push frame
+                // (In practice, use a FIFO history buffer of size frame_size + block_size)
+            }
+        }
+        return false;
     }
 };

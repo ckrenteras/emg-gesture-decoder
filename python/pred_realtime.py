@@ -17,7 +17,7 @@ import tkinter as tk
 
 SERIAL_PORT = "/dev/cu.usbmodem202636001"
 BAUD_RATE = 115200
-MODEL_PATH = os.path.join('..', 'models', 'v1', 'rf_v1.pkl')
+MODEL_PATH = os.path.join('..', 'models', 'v2', 'rf_v2.pkl')
 FEATURE_COL_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'feature_columns.json')
 CLASS_MAPPING_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'class_mapping.json')
 AMP_FEATURE_PATH = os.path.join(os.path.dirname(MODEL_PATH), 'amp_feature_columns.json')
@@ -28,12 +28,13 @@ BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE  # for now
 CALIBRATION_SAMPLES = 10400 # first 5 seconds, drop first window
 PRED_HISTORY_SIZE = 1
 FILTER_ORDER = 3
+WAMP_THRESHOLD = 0.003
 
 
 GESTURE_DISPLAY_MAPPING = {
     "open_hand": "Open hand",
     "rest": "Rest",
-    "fist": "Fist",
+    "pinch": "Pinch",
     "index": "Index"
 }
 
@@ -62,12 +63,10 @@ with open(FEATURE_COL_PATH, 'r') as file:
     feature_cols = json.load(file)
 with open(CLASS_MAPPING_PATH, 'r') as file:
     class_mapping = json.load(file)
-with open(AMP_FEATURE_PATH, 'r') as file:
-    amplitude_feature_cols = json.load(file)
 
 # ======== baseline calibration =========
 
-def get_rest_stats(feature_df, amplitude_cols=amplitude_feature_cols):
+def get_rest_stats(feature_df, amplitude_cols=feature_cols):
     rest_median = feature_df[amplitude_cols].median()
     rest_mad = feature_df[amplitude_cols].apply(
         lambda s: median_abs_deviation(s, scale='normal', nan_policy='omit')
@@ -75,7 +74,7 @@ def get_rest_stats(feature_df, amplitude_cols=amplitude_feature_cols):
     return rest_median, rest_mad
 
 def apply_baseline_calibration(feature_df, rest_median, rest_mad,
-                               amplitude_cols=amplitude_feature_cols, eps=1e-8, clip=CALIBRATION_Z_CLIP):
+                               amplitude_cols=feature_cols, eps=1e-8, clip=CALIBRATION_Z_CLIP):
     calibrated_df = feature_df.copy()
     z = (calibrated_df[amplitude_cols] - rest_median) / (rest_mad + eps)
     calibrated_df[amplitude_cols] = z.clip(-clip, clip)
@@ -96,13 +95,36 @@ def get_features(emg_data, feature_cols=feature_cols):
     def crossings(s): 
         return (s.shift(1) * s < 0)
     windowed_zc_col = crossings(df['emg']).rolling(window=WINDOW_SIZE, step=STEP_SIZE).sum()
+    freqs = np.fft.rfftfreq(WINDOW_SIZE, d=1/SAMPLE_RATE)
+    def mean_freq(x):
+        """frequency weighted avg"""
+        power = np.abs(np.fft.rfft(x)) ** 2
+        return np.sum(freqs * power) / np.sum(power)
+    windowed_mean_freq_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(mean_freq, raw=True)
+    def median_freq(x):
+        """emg median freq MDF"""
+        power = np.abs(np.fft.rfft(x)) ** 2
+        cum_power = np.cumsum(power)
+        return freqs[np.searchsorted(cum_power, cum_power[-1] / 2)]
+    windowed_median_freq_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(median_freq, raw=True)
+    def ssc(x):
+        diffs = np.diff(x)
+        return np.sum(diffs[:-1] * diffs[1:] < 0)
+    windowed_ssc_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(ssc, raw=True)
+    def wamp(x, threshold=WAMP_THRESHOLD):
+        return np.sum(np.abs(np.diff(x)) > threshold)
+    windowed_wamp_col = df["emg"].rolling(window=WINDOW_SIZE, step=STEP_SIZE).apply(wamp, raw=True)
     feature_df = pd.DataFrame({"RMS": windowed_rms_col,
                                "waveform_len": windowed_wfl_col,
                                "MAV": windowed_mav_col,
                                "max_abs": windowed_max_col,
                                "min_abs": windowed_min_col,
                                "zero_crossings": windowed_zc_col,
-                               "std": windowed_stdev_col})
+                               "std": windowed_stdev_col,
+                               "mean_freq": windowed_mean_freq_col,
+                               "median_freq": windowed_median_freq_col,
+                               "ssc": windowed_ssc_col,
+                               "wamp": windowed_wamp_col})
     feature_df = feature_df.dropna()
     return feature_df
 

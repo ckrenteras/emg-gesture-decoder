@@ -5,13 +5,14 @@ import os
 SERIAL_PORT = "/dev/cu.usbmodem202636001"
 BAUD_RATE = 115200
 
-GESTURE = 'fist'
-CLASS = 2
+GESTURE = 'index'
+CLASS = 4
 
 SUBJECT = 1
-TRIAL = 14
+TRIAL = 18
+
 ARM = 'left'
-OUTPUT_PATH = os.path.join('..', 'data', 'my_data', 'subject_one', 'individual_files', f'{GESTURE}_subject_{SUBJECT}_{ARM}_trial_{TRIAL:02d}b.csv')
+OUTPUT_PATH = os.path.join('..', 'data', 'my_data', 'subject_one', 'individual_files', f'{GESTURE}_subject_{SUBJECT}_{ARM}_trial_{TRIAL:02d}c.csv')
 
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 

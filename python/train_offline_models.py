@@ -11,7 +11,7 @@ import sklearn.metrics as metrics
 import pickle
 import json
 
-DATA_PATH = csv_path = os.path.join("..", "data", 'my_data', 'subject_one', "combined_subject_one.csv")
+DATA_PATH = csv_path = os.path.join("..", "data", 'my_data', 'subject_one', "combined_new_placement.csv")
 RESULTS_PATH = os.path.join('.', 'results', 'my_data')
 
 # ======= pre processing consts =====
@@ -20,21 +20,25 @@ HIGH_PASS_FREQ = 20
 SAMPLE_RATE = 2000 # Hz
 WINDOW = 400
 STEP = 200
+WAMP_THRESHOLD = 0.003
+
 
 # ====== dataset consts =======
-TRIALS = range(1, 33) 
-CLASSES = [0, 1, 2, 4]
+# new muscle group placement: rest 1-23, open_hand 9-23 (relaxed effort only),
+# pinch/index 1-8+17-23 (no 9-16 data for these two)
+TRIALS = range(1, 24)
+CLASSES = [0, 1, 3, 4]
 BITS = 10
 VREF = 3.7
 
 #=======  model constants =======
-FEATURE_COLS = ["RMS", "waveform_len", "MAV", "max_abs", "min_abs", "std", 'zero_crossings']
-AMPLITUDE_FEATURE_COLS = ["RMS", "MAV", "max_abs", "min_abs", "std", "waveform_len", "zero_crossings"]
-CALIBRATION_Z_CLIP = 32  
+FEATURE_COLS = ["RMS", "waveform_len", "MAV", "max_abs", "min_abs", "std", 'zero_crossings',
+                'mean_freq', 'median_freq', 'ssc']
+CALIBRATION_Z_CLIP = 32
 CLASS_MAPPING = {
     0: "rest",
     1: "open_hand",
-    2: "fist",
+    3: "pinch",
     4: "index"
 }
 
@@ -87,6 +91,18 @@ def get_feature_df(df, read_trials=range(1, 9), classes=range(0, 5), filter=True
     windowed_mav_col = df["emg"].rolling(window=WINDOW, step=STEP).apply(lambda x: np.abs(x).mean())
     windowed_min_col = df["emg"].rolling(window=WINDOW, step=STEP).apply(lambda x: np.abs(x).min())
     windowed_max_col = df["emg"].rolling(window=WINDOW, step=STEP).apply(lambda x: np.abs(x).max())
+    freqs = np.fft.rfftfreq(WINDOW, d=1/SAMPLE_RATE)
+    def mean_freq(x):
+        """frequency weighted avg"""
+        power = np.abs(np.fft.rfft(x)) ** 2
+        return np.sum(freqs * power) / np.sum(power)
+    windowed_mean_freq_col = df["emg"].rolling(window=WINDOW, step=STEP).apply(mean_freq, raw=True)
+    def median_freq(x):
+        """emg median freq MDF"""
+        power = np.abs(np.fft.rfft(x)) ** 2
+        cum_power = np.cumsum(power)
+        return freqs[np.searchsorted(cum_power, cum_power[-1] / 2)]
+    windowed_median_freq_col = df["emg"].rolling(window=WINDOW, step=STEP).apply(median_freq, raw=True)
     def crossings(s): 
         return (s.shift(1) * s < 0)
     windowed_zc_col = crossings(df['emg']).rolling(window=WINDOW, step=STEP).sum()
@@ -95,6 +111,13 @@ def get_feature_df(df, read_trials=range(1, 9), classes=range(0, 5), filter=True
     windowed_mask_mixed_col = rolling_class.min() == rolling_class.max()
     rolling_trial = df["trial"].rolling(window=WINDOW, step=STEP)
     windowed_mask_mixed_trial = rolling_trial.min() == rolling_trial.max()
+    def ssc(x):
+        diffs = np.diff(x)
+        return np.sum(diffs[:-1] * diffs[1:] < 0)
+    windowed_ssc_col = df["emg"].rolling(window=WINDOW, step=STEP).apply(ssc, raw=True)
+    def wamp(x, threshold=WAMP_THRESHOLD):
+        return np.sum(np.abs(np.diff(x)) > threshold)
+    windowed_wamp_col = df["emg"].rolling(window=WINDOW, step=STEP).apply(wamp, raw=True)
     feature_df = pd.DataFrame({"RMS": windowed_rms_col,
                                "waveform_len": windowed_wfl_col,
                                "MAV": windowed_mav_col,
@@ -106,7 +129,11 @@ def get_feature_df(df, read_trials=range(1, 9), classes=range(0, 5), filter=True
                                "class": windowed_class,
                                'subject': windowed_subject,
                                'trial': windowed_trial,
-                               'mask_mixed_trial': windowed_mask_mixed_trial})
+                               'mask_mixed_trial': windowed_mask_mixed_trial,
+                               'mean_freq': windowed_mean_freq_col,
+                               'median_freq': windowed_median_freq_col,
+                               "ssc": windowed_ssc_col,
+                               "wamp": windowed_wamp_col})
     feature_df = feature_df[feature_df['mask_mixed_col']]
     feature_df = feature_df[feature_df['mask_mixed_trial']]
 
@@ -143,7 +170,7 @@ def get_subject_rest_stats(feature_df, amplitude_cols, rest_class=0, max_samples
     )
     return rest_median, rest_mad
 
-def apply_baseline_calibration(feature_df, amplitude_cols=AMPLITUDE_FEATURE_COLS, rest_class=0,
+def apply_baseline_calibration(feature_df, amplitude_cols=FEATURE_COLS, rest_class=0,
                                max_samples=5000, eps=1e-8, clip=CALIBRATION_Z_CLIP):
     rest_median, rest_mad = get_subject_rest_stats(feature_df, amplitude_cols, rest_class=rest_class, max_samples=max_samples)
     calibrated_df = feature_df.copy()
@@ -234,7 +261,9 @@ def save_performance_metrics(train_results, test_results, classes, classifier_ty
 # ========= runner ========
 
 def main():
-    test_trials = [23, 24, 30, 14, 15]
+    # test trials must have all 4 classes present, i.e. from the 17-23 range
+    # (open_hand isn't in 1-8, pinch/index aren't in 9-16)
+    test_trials = [20, 22]
     train_trials = [t for t in TRIALS if t not in test_trials]
     train_feature, test_feature = get_train_test_df( data_path=DATA_PATH,
                                                     train_trials=train_trials,
@@ -250,20 +279,17 @@ def main():
     save_performance_metrics(train_results, test_results, CLASSES)
 
 
-    model_path = os.path.join("..", "models", "v1", "log_reg_v1.pkl")
-    v1_path = os.path.dirname(model_path)
-    class_mapping_path = os.path.join(v1_path, "class_mapping.json")
-    features_path = os.path.join(v1_path, "feature_columns.json")
-    amplitude_features_path = os.path.join(v1_path, "amp_feature_columns.json")
-    os.makedirs(v1_path, exist_ok=True)
+    model_path = os.path.join("..", "models", "v2", "log_reg_v2.pkl")
+    v2_path = os.path.dirname(model_path)
+    class_mapping_path = os.path.join(v2_path, "class_mapping.json")
+    features_path = os.path.join(v2_path, "feature_columns.json")
+    os.makedirs(v2_path, exist_ok=True)
     with open(model_path, "wb") as file:
         pickle.dump(reg, file)
     with open(class_mapping_path, "w") as file:
             json.dump(CLASS_MAPPING, file)
     with open(features_path, "w") as file:
                 json.dump(FEATURE_COLS, file)
-    with open(amplitude_features_path, "w") as file:
-                json.dump(AMPLITUDE_FEATURE_COLS, file)
 
     # ===== lil rf run ======
     rf = train_rf(train_cal)
@@ -272,9 +298,20 @@ def main():
     save_performance_metrics(rf_train_results, rf_test_results, CLASSES, classifier_type='rf')
 
 
-    rf_model_path = os.path.join("..", "models", "v1", "rf_v1.pkl")
+    rf_model_path = os.path.join("..", "models", "v2", "rf_v2.pkl")
     with open(rf_model_path, "wb") as file:
         pickle.dump(rf, file)
+
+        # ===== lda run ======
+    lda = train_lda(train_cal)
+    lda_train_results = evaluate_model_detailed(lda, train_cal)
+    lda_test_results = evaluate_model_detailed(lda, test_cal)
+    save_performance_metrics(lda_train_results, lda_test_results, CLASSES, classifier_type='lda')
+
+
+    lda_model_path = os.path.join("..", "models", "v2", "lda_v2.pkl")
+    with open(lda_model_path, "wb") as file:
+        pickle.dump(lda, file)
 
 if __name__ == "__main__":
     main()
