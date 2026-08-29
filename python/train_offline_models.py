@@ -11,7 +11,7 @@ import sklearn.metrics as metrics
 import pickle
 import json
 
-DATA_PATH = csv_path = os.path.join("..", "data", 'my_data', 'subject_one', "combined_new_placement.csv")
+DATA_PATH = csv_path = os.path.join("..", "data", 'my_data', 'subject_one', "combined_subject_one.csv")
 RESULTS_PATH = os.path.join('.', 'results', 'my_data')
 
 # ======= pre processing consts =====
@@ -24,10 +24,10 @@ WAMP_THRESHOLD = 0.003
 
 
 # ====== dataset consts =======
-# new muscle group placement: rest 1-23, open_hand 9-23 (relaxed effort only),
-# pinch/index 1-8+17-23 (no 9-16 data for these two)
-TRIALS = range(1, 24)
-CLASSES = [0, 1, 3, 4]
+# note, sessions [1-23] were 1 session, 24-33 a second session
+# significant variation from session to session
+TRIALS = range(1, 33)
+CLASSES = [0, 1, 3, 6] # rest, open_hand, pinch, chaka, easy to distinguish
 BITS = 10
 VREF = 3.7
 
@@ -39,8 +39,11 @@ CLASS_MAPPING = {
     0: "rest",
     1: "open_hand",
     3: "pinch",
-    4: "index"
+    6: "chaka"
 }
+
+# ====== training consts ===========
+TEST_TRIALS = [32, 30, 19, 18, 20, 23, 29] # 26% of data
 
 #======== pre processing ============
 
@@ -137,7 +140,7 @@ def get_feature_df(df, read_trials=range(1, 9), classes=range(0, 5), filter=True
     feature_df = feature_df[feature_df['mask_mixed_col']]
     feature_df = feature_df[feature_df['mask_mixed_trial']]
 
-    # drop each trial's very first window because Butterworth filter has
+    # drop each trials first window because Butterworth filter has
     # 0 init cond. first window is filter's startup transient
     feature_df = feature_df[feature_df.groupby('trial').cumcount() != 0]
     return feature_df
@@ -210,9 +213,9 @@ def train_rf(df, feature_cols=FEATURE_COLS):
      rf.fit(features, labels)
      return rf
 
-def train_lda(df, feature_cols=FEATURE_COLS):
+def train_lda(df, feature_cols=FEATURE_COLS, store_covariance=False):
     features, labels = get_df_features_labels(df, feature_cols)
-    lda = LinearDiscriminantAnalysis()
+    lda = LinearDiscriminantAnalysis(store_covariance=store_covariance)
     lda.fit(features, labels)
     return lda
 
@@ -230,6 +233,61 @@ def evaluate_model_detailed(model, df, feature_cols=FEATURE_COLS, f1_average='ma
         'f1': f1,
         'bacc': bacc,
         'confusion_matrix': confusion_matrix
+    }
+    return results
+
+# ===== session-recalibrated LDA evaluation =====
+# mirrors how pred_realtime.py actually predicts in production: shared covariance and
+# class priors held fixed from training, but per-class means recomputed per trial from
+# a short "live calibration" slice of that trial's own data, instead of scoring with
+# the frozen training-set means.
+RECAL_CALIBRATION_WINDOWS = 20  # a few seconds of held gesture comparable to pred_realtime live calibration
+
+def lda_discriminant_scores(features, centroids, cov_inv, priors, classes):
+    scores = np.zeros((len(features), len(classes)))
+    for i, c in enumerate(classes):
+        mu = centroids[c]
+        w = cov_inv @ mu
+        b = -0.5 * mu @ cov_inv @ mu + np.log(priors[c])
+        scores[:, i] = features @ w + b
+    return scores
+
+def evaluate_lda_recalibrated(df, cov_inv, priors, feature_cols=FEATURE_COLS,
+                              classes=CLASSES, calibration_windows=RECAL_CALIBRATION_WINDOWS):
+    classes_sorted = sorted(classes)
+    all_true, all_pred = [], []
+    skipped = []
+    for trial, trial_df in df.groupby('trial'):
+        centroids = {}
+        eval_idx_parts = []
+        for c in classes_sorted:
+            class_rows = trial_df[trial_df['class'] == c]
+            if len(class_rows) <= calibration_windows:
+                skipped.append(trial)
+                centroids = None
+                break
+            centroids[c] = class_rows.iloc[:calibration_windows][feature_cols].mean(axis=0).to_numpy()
+            eval_idx_parts.append(class_rows.index[calibration_windows:])
+        if centroids is None:
+            continue
+        eval_rows = trial_df.loc[np.concatenate(eval_idx_parts)]
+        features = eval_rows[feature_cols].to_numpy()
+        scores = lda_discriminant_scores(features, centroids, cov_inv, priors, classes_sorted)
+        preds = np.array(classes_sorted)[np.argmax(scores, axis=1)]
+        all_true.extend(eval_rows['class'].tolist())
+        all_pred.extend(preds.tolist())
+
+    if skipped:
+        print(f"WARNING: skipped trials with too few windows to recalibrate: {sorted(set(skipped))}")
+
+    all_true = np.array(all_true)
+    all_pred = np.array(all_pred)
+    results = {
+        'preds': all_pred,
+        'score': float((all_true == all_pred).mean()),
+        'f1': metrics.f1_score(all_true, all_pred, average='macro'),
+        'bacc': metrics.balanced_accuracy_score(all_true, all_pred),
+        'confusion_matrix': metrics.confusion_matrix(all_true, all_pred, labels=classes_sorted)
     }
     return results
 
@@ -261,13 +319,12 @@ def save_performance_metrics(train_results, test_results, classes, classifier_ty
 # ========= runner ========
 
 def main():
-    # test trials must have all 4 classes present, i.e. from the 17-23 range
-    # (open_hand isn't in 1-8, pinch/index aren't in 9-16)
-    test_trials = [20, 22]
-    train_trials = [t for t in TRIALS if t not in test_trials]
+    # test trials must have all 4 classes present from the 17-23 range
+    # (open_hand isn't in 1-8, pinch/chaka 9-16, chaka missing trial 18)
+    train_trials = [t for t in TRIALS if t not in TEST_TRIALS]
     train_feature, test_feature = get_train_test_df( data_path=DATA_PATH,
                                                     train_trials=train_trials,
-                                                    test_trials=test_trials,
+                                                    test_trials=TEST_TRIALS,
                                                     classes=CLASSES)
 
     train_cal = apply_baseline_calibration(train_feature)
@@ -279,11 +336,11 @@ def main():
     save_performance_metrics(train_results, test_results, CLASSES)
 
 
-    model_path = os.path.join("..", "models", "v2", "log_reg_v2.pkl")
-    v2_path = os.path.dirname(model_path)
-    class_mapping_path = os.path.join(v2_path, "class_mapping.json")
-    features_path = os.path.join(v2_path, "feature_columns.json")
-    os.makedirs(v2_path, exist_ok=True)
+    model_path = os.path.join("..", "models", "v3", "log_reg_v3.pkl")
+    v3_path = os.path.dirname(model_path)
+    class_mapping_path = os.path.join(v3_path, "class_mapping.json")
+    features_path = os.path.join(v3_path, "feature_columns.json")
+    os.makedirs(v3_path, exist_ok=True)
     with open(model_path, "wb") as file:
         pickle.dump(reg, file)
     with open(class_mapping_path, "w") as file:
@@ -298,20 +355,40 @@ def main():
     save_performance_metrics(rf_train_results, rf_test_results, CLASSES, classifier_type='rf')
 
 
-    rf_model_path = os.path.join("..", "models", "v2", "rf_v2.pkl")
+    rf_model_path = os.path.join("..", "models", "v3", "rf_v3.pkl")
     with open(rf_model_path, "wb") as file:
         pickle.dump(rf, file)
 
         # ===== lda run ======
-    lda = train_lda(train_cal)
-    lda_train_results = evaluate_model_detailed(lda, train_cal)
-    lda_test_results = evaluate_model_detailed(lda, test_cal)
+    lda = train_lda(train_cal, store_covariance=True)
+    shared_cov_inv = np.linalg.pinv(lda.covariance_)
+    lda_priors = {c: float((train_cal['class'] == c).mean()) for c in CLASSES}
+    lda_train_results = evaluate_lda_recalibrated(train_cal, shared_cov_inv, lda_priors)
+    lda_test_results = evaluate_lda_recalibrated(test_cal, shared_cov_inv, lda_priors)
     save_performance_metrics(lda_train_results, lda_test_results, CLASSES, classifier_type='lda')
 
 
-    lda_model_path = os.path.join("..", "models", "v2", "lda_v2.pkl")
+    lda_model_path = os.path.join("..", "models", "v3", "lda_v3.pkl")
     with open(lda_model_path, "wb") as file:
         pickle.dump(lda, file)
+
+    # ===== session-recalibration artifacts =====
+    # LDA's shared (within-class) covariance and class priors, learned once from all
+    # training data -- paired at inference time with LIVE per-class means captured
+    # during calibration instead of the frozen training-set means.
+    train_centroids = {
+        int(c): train_cal.loc[train_cal['class'] == c, FEATURE_COLS].mean(axis=0).tolist()
+        for c in CLASSES
+    }
+
+    covariance_path = os.path.join(v3_path, "lda_shared_covariance.npy")
+    centroids_path = os.path.join(v3_path, "train_centroids.json")
+    priors_path = os.path.join(v3_path, "class_priors.json")
+    np.save(covariance_path, lda.covariance_)
+    with open(centroids_path, "w") as file:
+        json.dump(train_centroids, file)
+    with open(priors_path, "w") as file:
+        json.dump({int(c): p for c, p in lda_priors.items()}, file)
 
 if __name__ == "__main__":
     main()
