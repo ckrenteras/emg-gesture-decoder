@@ -1,3 +1,9 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[13]:
+
+
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
@@ -11,6 +17,11 @@ import sklearn.metrics as metrics
 import pickle
 import json
 
+
+# In[29]:
+
+
+#===== dir constants =======
 DATA_PATH = csv_path = os.path.join("..", "data", 'my_data', 'subject_one', "combined_subject_one.csv")
 RESULTS_PATH = os.path.join('.', 'results', 'my_data')
 MODEL_PATH = os.path.join("..", "models", "v4",)
@@ -45,7 +56,10 @@ CLASS_MAPPING = {
 
 # ====== training consts ===========
 TEST_TRIALS = [32, 30, 19, 18, 20, 23, 29] # 26% of data
-RECAL_CALIBRATION_WINDOWS = 20
+
+
+# In[15]:
+
 
 #======== pre processing ============
 
@@ -69,6 +83,10 @@ def filter_emg(df, cutoff=HIGH_PASS_FREQ, fs=SAMPLE_RATE, butter_order=3, filter
     pre_processed_df['subject'] = df['subject']
     pre_processed_df['trial'] = df['trial']
     return pre_processed_df
+
+
+# In[16]:
+
 
 # ===== feature extraction =========
 
@@ -163,6 +181,10 @@ def get_train_test_df(data_path=DATA_PATH, train_trials=range(1, 9),
     test_df = get_feature_df(df, read_trials=test_trials, classes=classes)
     return train_df, test_df
 
+
+# In[17]:
+
+
 # ============== baseline calibration ============
 
 def get_subject_rest_stats(feature_df, amplitude_cols, rest_class=0, max_samples=10000):
@@ -188,6 +210,10 @@ def apply_baseline_calibration(feature_df, amplitude_cols=FEATURE_COLS, rest_cla
         calibrated_df.loc[mask, amplitude_cols] = z.clip(-clip, clip)
     return calibrated_df
 
+
+# In[18]:
+
+
 # ======== train + eval ===============
 
 def get_df_features_labels(df, feature_cols=FEATURE_COLS):
@@ -195,11 +221,80 @@ def get_df_features_labels(df, feature_cols=FEATURE_COLS):
     labels = df["class"].to_numpy()
     return features, labels
 
+def evaluate_model(model, df, feature_cols=FEATURE_COLS):
+    features, labels = get_df_features_labels(df, feature_cols)
+    preds = model.predict(features)
+    score = model.score(features, labels)
+    return preds, score
+
+def train_log_reg(df, feature_cols=FEATURE_COLS):
+    features, labels = get_df_features_labels(df, feature_cols)
+    reg = LogisticRegression(max_iter=10000)
+    reg.fit(features, labels)
+    return reg
+
+def train_rf(df, feature_cols=FEATURE_COLS):
+     features, labels = get_df_features_labels(df, feature_cols)
+     rf = RandomForestClassifier(n_estimators=100, max_depth=5, 
+                                 min_samples_leaf=20, oob_score=True,
+                                 random_state=0)
+     rf.fit(features, labels)
+     return rf
+
 def train_lda(df, feature_cols=FEATURE_COLS, store_covariance=True):
     features, labels = get_df_features_labels(df, feature_cols)
     lda = LinearDiscriminantAnalysis(store_covariance=store_covariance)
     lda.fit(features, labels)
     return lda
+
+def evaluate_model_detailed(model, df, feature_cols=FEATURE_COLS, f1_average='macro'):
+    preds, score = evaluate_model(model, df, feature_cols=feature_cols)
+    labels = df['class'].to_numpy()
+
+    f1 = metrics.f1_score(labels, preds, average=f1_average)
+    bacc = metrics.balanced_accuracy_score(labels, preds)
+    confusion_matrix = metrics.confusion_matrix(labels, preds)
+
+    results = {
+        'preds': preds,
+        'score': score,
+        'f1': f1,
+        'bacc': bacc,
+        'confusion_matrix': confusion_matrix
+    }
+    return results
+
+
+# In[20]:
+
+
+# =========== save results =============
+
+def save_performance_metrics(train_results, test_results, classes, classifier_type='log_reg', results_dir=RESULTS_PATH):
+    os.makedirs(results_dir, exist_ok=True)
+    tag = ""
+    for c in classes:
+        tag += str(c)
+    train_clean = train_results.copy()
+    test_clean = test_results.copy()
+    del train_clean['preds']
+    del test_clean['preds']
+    train_confusion_matrix = train_clean.pop('confusion_matrix', None)
+    test_confusion_matrix = test_clean.pop('confusion_matrix', None)
+ 
+    train_confusion_path = os.path.join(results_dir, classifier_type + '_train_confusion_matrix_' + tag + '.npy')
+    test_confusion_path = os.path.join(results_dir, classifier_type + '_test_confusion_matrix_' + tag + '.npy')
+    results_path = os.path.join(results_dir, classifier_type + f'_sumary_results_{tag}.csv')
+    np.save(train_confusion_path, train_confusion_matrix)
+    np.save(test_confusion_path, test_confusion_matrix)
+
+    results = [train_clean, test_clean]
+    results_df = pd.DataFrame(results, index=['train', 'test'])
+
+    results_df.to_csv(results_path, index=True, index_label='split')
+
+# ===== lda w/ recal ======
+RECAL_CALIBRATION_WINDOWS = 20  # 2.1 seconds of held gesture comparable to pred_realtime live calibration
 
 def lda_discriminant_scores(features, centroids, cov_inv, priors, classes):
     """from scratch implementation of lda disc. f'n so we can dynamically adjust centroids
@@ -254,47 +349,77 @@ def evaluate_lda_recalibrated(model, df, feature_cols=FEATURE_COLS,
         'confusion_matrix': metrics.confusion_matrix(all_true, all_pred, labels=classes_sorted)
     }
     return results
-# =========== save results =============
 
-def save_performance_metrics(train_results, test_results, classes, classifier_type='log_reg', results_dir=RESULTS_PATH):
-    os.makedirs(results_dir, exist_ok=True)
-    tag = ""
-    for c in classes:
-        tag += str(c)
-    train_clean = train_results.copy()
-    test_clean = test_results.copy()
-    del train_clean['preds']
-    del test_clean['preds']
-    train_confusion_matrix = train_clean.pop('confusion_matrix', None)
-    test_confusion_matrix = test_clean.pop('confusion_matrix', None)
- 
-    train_confusion_path = os.path.join(results_dir, classifier_type + '_train_confusion_matrix_' + tag + '.npy')
-    test_confusion_path = os.path.join(results_dir, classifier_type + '_test_confusion_matrix_' + tag + '.npy')
-    results_path = os.path.join(results_dir, classifier_type + f'_sumary_results_{tag}.csv')
-    np.save(train_confusion_path, train_confusion_matrix)
-    np.save(test_confusion_path, test_confusion_matrix)
-
-    results = [train_clean, test_clean]
-    results_df = pd.DataFrame(results, index=['train', 'test'])
-
-    results_df.to_csv(results_path, index=True, index_label='split')
-
-# ========= runner ========
-
+# In[30]:
 def main():
     # test trials must have all 4 classes present from the 17-23 range
     # (open_hand isn't in 1-8, pinch/chaka 9-16, chaka missing trial 18)
     train_trials = [t for t in TRIALS if t not in TEST_TRIALS]
     train_feature, test_feature = get_train_test_df( data_path=DATA_PATH,
-                                                    train_trials=train_trials,
-                                                    test_trials=TEST_TRIALS,
-                                                    classes=CLASSES)
+                                                        train_trials=train_trials,
+                                                        test_trials=TEST_TRIALS,
+                                                        classes=CLASSES)
 
     train_cal = apply_baseline_calibration(train_feature)
     test_cal = apply_baseline_calibration(test_feature)
 
+    os.makedirs(MODEL_PATH, exist_ok=True)
+    class_mapping_path = os.path.join(MODEL_PATH, "class_mapping.json")
+    features_path = os.path.join(MODEL_PATH, "feature_columns.json")
+    with open(class_mapping_path, "w") as file:
+        json.dump(CLASS_MAPPING, file)
+    with open(features_path, "w") as file:
+        json.dump(FEATURE_COLS, file)
 
+
+    # In[31]:
+
+
+    # regression model
+    reg = train_log_reg(train_cal)
+    train_results = evaluate_model_detailed(reg, train_cal)
+    test_results = evaluate_model_detailed(reg, test_cal)
+    save_performance_metrics(train_results, test_results, CLASSES)
+
+    reg_path = os.path.join(MODEL_PATH, "log_reg_v4.pkl")
+    with open(reg_path, "wb") as file:
+        pickle.dump(reg, file)
+
+
+    # In[32]:
+
+
+    # random forest
+    rf = train_rf(train_cal)
+    rf_train_results = evaluate_model_detailed(rf, train_cal)
+    rf_test_results = evaluate_model_detailed(rf, test_cal)
+    save_performance_metrics(rf_train_results, rf_test_results, CLASSES, classifier_type='rf')
+
+    rf_model_path = os.path.join(MODEL_PATH, "rf_v4.pkl")
+    with open(rf_model_path, "wb") as file:
+        pickle.dump(rf, file)
+
+
+    # In[34]:
+
+
+    # lda w/o calibration
     lda = train_lda(train_cal, store_covariance=True)
+    lda_train_results = evaluate_model_detailed(lda, train_cal)
+    lda_test_results = evaluate_model_detailed(lda, test_cal)
+    save_performance_metrics(lda_train_results, lda_test_results, CLASSES, classifier_type='lda')
+
+    lda_model_path = os.path.join(MODEL_PATH, "lda_v4.pkl")
+    with open(lda_model_path, "wb") as file:
+        pickle.dump(lda, file)
+
+
+    # Lil experiment here. There's a lot of variation from session to session. Trying out an LDA model with centroids calculated per session/trial, then at the beginning of lvie prediction (instead of just baseline calibration, hold out each gesture for a couple seconds to get per session means)
+
+    # In[133]:
+
+
+    # lda w/ calibration
     train_centroids = lda.means_.tolist()
     train_priors = lda.priors_.tolist()
     covariance_path = os.path.join(MODEL_PATH, "lda_shared_covariance.npy")
@@ -310,5 +435,10 @@ def main():
     lda_test_results = evaluate_lda_recalibrated(lda, test_cal)
     save_performance_metrics(lda_train_results, lda_test_results, CLASSES, classifier_type='lda_recal')
 
+
+# In[ ]:
 if __name__ == "__main__":
     main()
+
+
+

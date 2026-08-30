@@ -16,18 +16,17 @@ import tkinter as tk
 
 SERIAL_PORT = "/dev/cu.usbmodem202636001"
 BAUD_RATE = 115200
-MODEL_DIR = os.path.join('..', 'models', 'v3')
+MODEL_DIR = os.path.join('..', 'models', 'v4')
 FEATURE_COL_PATH = os.path.join(MODEL_DIR, 'feature_columns.json')
 CLASS_MAPPING_PATH = os.path.join(MODEL_DIR, 'class_mapping.json')
 COVARIANCE_PATH = os.path.join(MODEL_DIR, 'lda_shared_covariance.npy')
-TRAIN_CENTROIDS_PATH = os.path.join(MODEL_DIR, 'train_centroids.json')
 CLASS_PRIORS_PATH = os.path.join(MODEL_DIR, 'class_priors.json')
 WINDOW_SIZE = 400
 STEP_SIZE = 200
 NUM_WINDOWS_FOR_VOTE = 10 # for now
-BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE  # for now
+BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE
 CALIBRATION_SAMPLES = 10400 # first 5 seconds, drop first window
-GESTURE_CALIBRATION_SAMPLES = 5200  # ~2.5s per active gesture, drop first window
+GESTURE_CALIBRATION_SAMPLES = 5200  # ~2.6s per active gesture, drop first window
 PRED_HISTORY_SIZE = 1
 FILTER_ORDER = 3
 WAMP_THRESHOLD = 0.003
@@ -63,8 +62,6 @@ with open(FEATURE_COL_PATH, 'r') as file:
     feature_cols = json.load(file)
 with open(CLASS_MAPPING_PATH, 'r') as file:
     class_mapping = json.load(file)
-with open(TRAIN_CENTROIDS_PATH, 'r') as file:
-    train_centroids = {k: np.array(v) for k, v in json.load(file).items()}
 with open(CLASS_PRIORS_PATH, 'r') as file:
     class_priors = json.load(file)
 shared_covariance = np.load(COVARIANCE_PATH)
@@ -75,12 +72,13 @@ ACTIVE_CLASSES = [k for k in class_mapping if k != REST_CLASS]
 
 # ======== baseline calibration =========
 
-def get_rest_stats(feature_df, amplitude_cols=feature_cols):
-    rest_median = feature_df[amplitude_cols].median()
-    rest_mad = feature_df[amplitude_cols].apply(
+def get_rest_stats(feature_df, feature_cs=feature_cols):
+    rest_median = feature_df[feature_cs].median()
+    rest_mean = feature_df[feature_cs].mean()
+    rest_mad = feature_df[feature_cs].apply(
         lambda s: median_abs_deviation(s, scale='normal', nan_policy='omit')
     )
-    return rest_median, rest_mad
+    return rest_median, rest_mad, rest_mean
 
 def apply_baseline_calibration(feature_df, rest_median, rest_mad,
                                amplitude_cols=feature_cols, eps=1e-8, clip=CALIBRATION_Z_CLIP):
@@ -140,8 +138,8 @@ def get_features(emg_data, feature_cols=feature_cols):
 # ======== session-recalibrated LDA discriminant ========
 
 def lda_discriminant_scores(features, live_centroids, cov_inv=shared_cov_inv, priors=class_priors):
-    """Standard LDA discriminant score per class, using the shared covariance learned at
-    training time but per-class means captured live at the start of THIS session."""
+    """from scratch implementation to use cov and priors from training data but sampled 
+    centroid from calibration"""
     classes = sorted(live_centroids.keys(), key=int)
     scores = np.zeros((len(features), len(classes)))
     for i, c in enumerate(classes):
@@ -179,7 +177,6 @@ def gesture_to_display_name(gesture, gesture_display_mapping=GESTURE_DISPLAY_MAP
         raise ValueError(f'Unexpected gesture: {gesture}')
     return gesture_display_mapping[str(gesture)]
 
-
 def read_filtered_sample():
     """Blocks until one valid filtered sample is available from the serial port."""
     while True:
@@ -193,7 +190,6 @@ def read_filtered_sample():
             continue
         return filter_sample(adc_value)
 
-
 def main():
     root = tk.Tk()
     root.title("Prediction Display")
@@ -206,7 +202,7 @@ def main():
     root.update()
 
     try:
-        # ---- stage 1: rest calibration (unchanged) ----
+        # rest calibration, the same normalizaiton as before
         print("Calibrating: rest...")
         label.config(text="Calibrating: Rest")
         root.update()
@@ -216,16 +212,13 @@ def main():
             if len(rest_raw) % 500 == 0:
                 root.update()
         rest_features = get_features(rest_raw[400:])
-        rest_median, rest_mad = get_rest_stats(rest_features)
+        rest_median, rest_mad, rest_mean = get_rest_stats(rest_features)
         ser.reset_input_buffer()
         print("Rest calibration complete.")
 
-        # ---- stage 2: live per-gesture calibration ----
-        # captures a brief live sample of each active gesture and uses it, together with
-        # the covariance/priors learned at training time, in place of the frozen
-        # training-set class means -- this is what fixes the session-to-session drift
-        # that a frozen model can't adapt to.
-        live_centroids = {REST_CLASS: train_centroids[REST_CLASS]}  # rest is centered at 0 post-calibration by construction; keep training value as a stable anchor
+        # live centroid calibration per gesture
+        # helps adjust further for per session variability
+        live_centroids = {REST_CLASS: rest_mean}  # post calibration rest class
         for class_key in ACTIVE_CLASSES:
             gesture = class_to_gesture(class_key)
             display_name = gesture_to_display_name(gesture)
@@ -239,18 +232,13 @@ def main():
                     root.update()
             gesture_features = get_features(gesture_raw[400:])
             gesture_cal = apply_baseline_calibration(gesture_features, rest_median, rest_mad)
-            if len(gesture_cal) > 0:
-                live_centroids[class_key] = gesture_cal[feature_cols].mean(axis=0).to_numpy()
-            else:
-                print(f"WARNING: no usable calibration windows for {gesture}, falling back to training centroid.")
-                live_centroids[class_key] = train_centroids[class_key]
+            live_centroids[class_key] = gesture_cal[feature_cols].mean(axis=0).to_numpy()
             ser.reset_input_buffer()
 
         label.config(text="Calibration Complete")
         root.update()
         print("Full calibration complete. Starting predictions.")
 
-        # ---- stage 3: live prediction using session-recalibrated LDA ----
         running_data = []
         while True:
             root.update()
