@@ -45,7 +45,7 @@ CLASS_MAPPING = {
 
 # ====== training consts ===========
 TEST_TRIALS = [32, 30, 19, 18, 20, 23, 29] # 26% of data
-RECAL_CALIBRATION_WINDOWS = 20
+RECAL_CALIBRATION_WINDOWS = 20 #2.1s
 
 #======== pre processing ============
 
