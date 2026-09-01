@@ -190,6 +190,9 @@ RealtimeFeatureExtractor::RealtimeFeatureExtractor(size_t window_sz, size_t over
 }
 
 void RealtimeFeatureExtractor::read_samples(const std::vector<float>& data) {
+    if (has_new_features) {
+        clear_has_new_features();
+    }
     for (float sample : data) {
         buffer[write_head] = sample;
         buffer[window_size + write_head] = sample;
@@ -207,6 +210,12 @@ void RealtimeFeatureExtractor::read_samples(const std::vector<float>& data) {
             num_samples_read = 0;
         }
     }
+}
+
+const std::vector<float>& RealtimeFeatureExtractor::get_features() const { return features; }
+bool RealtimeFeatureExtractor::features_ready() const {return has_new_features; }
+void RealtimeFeatureExtractor::clear_features_ready() { 
+    has_new_features = false;
 }
 
 void RealtimeFeatureExtractor::extract_window() {
@@ -240,4 +249,5 @@ void RealtimeFeatureExtractor::process_features(const std::vector<float>& window
     float window_median_freq = median_freq(freqs, powers, FFT_SIZE / 2);
     features = {window_rms, window_wfl, window_std, window_mav, window_min_av, 
     window_max_av, window_zc, window_ssc, window_wamp, window_mean_freq, window_median_freq};
+    has_new_features = true;
 }

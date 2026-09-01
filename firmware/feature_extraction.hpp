@@ -27,6 +27,7 @@ float std_dev(std::vector<float> v, size_t v_size);
 float mean_abs_val(std::vector<float> v, size_t v_size);
 float min_abs_val(std::vector<float> v, size_t v_size);
 float max_abs_val(std::vector<float> v, size_t v_size);
+
 float zc(std::vector<float> v, size_t v_size);
 
 std::vector<float> fourier_transf(std::vector<float> input_v, size_t v_size, arm_cfft_instance_f32& fft_instance);
@@ -56,10 +57,13 @@ private:
     bool buffer_filled = false;
     std::vector<float> freqs;
     arm_cfft_instance_f32 fft_instance;
+    bool has_new_features = false;
 public:
     RealtimeFeatureExtractor(size_t window_sz, size_t overlap, float ref_v, float num_bits, float wamp_threshold);
-
-    void read_samples(const std::vector<float>& data) ;
+    const std::vector<float>& get_features() const;
+    bool features_ready() const;
+    void read_samples(const std::vector<float>& data);
+    void clear_features_ready();
 private:
     void extract_window();
     void process_features(const std::vector<float>& window);
