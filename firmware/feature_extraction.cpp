@@ -191,7 +191,7 @@ RealtimeFeatureExtractor::RealtimeFeatureExtractor(size_t window_sz, size_t over
 
 void RealtimeFeatureExtractor::read_samples(const std::vector<float>& data) {
     if (has_new_features) {
-        clear_has_new_features();
+        clear_features_ready();
     }
     for (float sample : data) {
         buffer[write_head] = sample;
@@ -232,6 +232,15 @@ void RealtimeFeatureExtractor::extract_window() {
 void RealtimeFeatureExtractor::process_features(const std::vector<float>& window) {
     // insert features here
     std::vector<float> emg = adc_to_volts(window, vref, bits);
+    filter.configure(ButterworthFilter::LOWPASS, LOW_PASS_FREQ, SAMPLE_RATE);
+    for (float &elt : emg) {
+        elt = filter.process(elt);
+    }
+    filter.reset();
+    filter.configure(ButterworthFilter::HIGHPASS, HIGH_PASS_FREQ, SAMPLE_RATE);
+    for (float &elt : emg) {
+        elt = filter.process(elt);
+    }
     std::vector<float> emg_cpy = emg;
     float window_rms = rms(emg_cpy, window_size);
     float window_wfl = wfl(emg_cpy, window_size);

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numeric>
 #include <arm_math.h> 
+#include "calibration.hpp"
 
 const float LOW_PASS_FREQ = 500;
 const float HIGH_PASS_FREQ = 20;
@@ -16,6 +17,8 @@ const int NUM_FEATURES = 11;
 
 const float BITS = 10;
 const float VREF = 3.7;
+
+extern ButterworthFilter filter;
 
 
 // features

@@ -6,12 +6,12 @@
 
 RealtimeFeatureExtractor extractor(WINDOW, WINDOW - STEP, VREF, BITS, WAMP_THRESH);
 
-void setup() {
+void init_serial() {
     Serial.begin(115200);
     HW_SERIAL.begin(115200);
 }
 
-void loop() {
+void read_available_samples() {
     std::vector<float> incoming_batch;
     while (HW_SERIAL.available() >= sizeof(float)) {
         float sample;
@@ -22,11 +22,5 @@ void loop() {
     if (!incoming_batch.empty()) {
         extractor.read_samples(incoming_batch);
     }
-
-    if (extractor.features_ready()) {
-        const std::vector<float>& features = extractor.get_features();
-        extractor.clear_features_ready();
-    }
 }
-
 

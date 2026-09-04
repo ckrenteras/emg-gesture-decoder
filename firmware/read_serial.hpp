@@ -4,5 +4,5 @@
 
 extern RealtimeFeatureExtractor extractor;
 
-void setup();
-void loop();
+void init_serial();
+void read_available_samples();
