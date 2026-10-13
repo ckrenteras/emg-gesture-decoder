@@ -1,3 +1,5 @@
 data/
 python/__pycache__
 python/compare_electrode_placement.ipynb
+firmware/secrets.h
+firmware/wifi_test/

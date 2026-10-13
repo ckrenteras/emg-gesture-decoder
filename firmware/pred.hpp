@@ -10,7 +10,7 @@
 
 inline const std::string PRIORS_PATH = "../models/v4/class_priors.json";
 inline const std::string INV_COV_PATH = "../models/v4/lda_shared_covariance.npy";
-inline const std::string MAPPINGS_PATH = "../models/v4/class_mappings.json";
+inline const std::string MAPPINGS_PATH = "../models/v4/class_mapping.json";
 
 using json = nlohmann::json;
 using namespace Eigen;

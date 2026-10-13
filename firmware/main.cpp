@@ -8,12 +8,26 @@
 #include "calibration.hpp"
 #include "pred.hpp"
 
-#define ESP_SERIAL Serial2
-const uint8_t FRAME_START = 0xAA;
+#include <SPI.h>
+#include <WiFiNINA.h>
+#include <WiFiUdp.h>
+#include "secrets.h"
+
+#define SPIWIFI_SS    10
+#define SPIWIFI_ACK    9   // BUSY
+#define ESP32_RESETN   8
+#define ESP32_GPIO0   -1   // not connected
+
+WiFiUDP udp;
+const IPAddress DEST_IP(255, 255, 255, 255);
+const uint16_t UDP_PORT = 4210;
+
+const char* WIFI_SSID = "iPhone (27)";
 
 void send_gesture(uint8_t gesture_id) {
-    uint8_t frame[3] = {FRAME_START, gesture_id, static_cast<uint8_t>(FRAME_START ^ gesture_id)};
-    ESP_SERIAL.write(frame, sizeof(frame));
+    udp.beginPacket(DEST_IP, UDP_PORT);
+    udp.write(&gesture_id, 1);
+    udp.endPacket();
 }
 
 const size_t REST_CALIBRATION_SAMPLES = 10400;   // ~5s 
@@ -44,7 +58,11 @@ void collect_into(std::vector<std::vector<float>>& dest, const std::vector<float
 
 void setup() {
     init_serial();
-    ESP_SERIAL.begin(115200);
+    WiFi.setPins(SPIWIFI_SS, SPIWIFI_ACK, ESP32_RESETN, ESP32_GPIO0, &SPI);
+    while (WiFi.begin(WIFI_SSID, WIFI_PASSWORD) != WL_CONNECTED) delay(500);
+    Serial.println(WiFi.localIP());
+    udp.begin(UDP_PORT);
+
 
     class_mapping = load_class_mappings(MAPPINGS_PATH);
     for (const auto& [id, name] : class_mapping) { // std::map iterates in ascending key order
