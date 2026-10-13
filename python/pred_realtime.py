@@ -24,7 +24,10 @@ CLASS_PRIORS_PATH = os.path.join(MODEL_DIR, 'class_priors.json')
 WINDOW_SIZE = 400
 STEP_SIZE = 200
 NUM_WINDOWS_FOR_VOTE = 10 # for now
-BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE
+# +1: pandas rolling(step=) evaluates at rows 0, STEP, 2*STEP..., so the first full window
+# ends at row WINDOW_SIZE. Without it only NUM_WINDOWS_FOR_VOTE - 1 windows fit and the
+# newest 199 samples are never used
+BUFFER_SIZE = WINDOW_SIZE + (NUM_WINDOWS_FOR_VOTE - 1) * STEP_SIZE + 1
 CALIBRATION_SAMPLES = 10400 # first 5 seconds, drop first window
 GESTURE_CALIBRATION_SAMPLES = 5200  # ~2.6s per active gesture, drop first window
 PRED_HISTORY_SIZE = 1

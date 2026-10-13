@@ -37,15 +37,18 @@ def main():
     root.geometry("1200x800")
     root.configure(bg="black")
     label = tk.Label(root, text="Waiting for prediction...", font=("Helvetica", 90, "bold"),
-                      relief="flat", bg="black", fg="white")
+                      relief="flat", bg="black", fg="white", wraplength=1100, justify="center")
     label.pack(expand=True)
 
     def poll():
         try:
             while True:
-                data, _ = sock.recvfrom(64)
-                if data:
+                data, _ = sock.recvfrom(256)
+                # 1 byte = gesture id, longer = calibration status text from the firmware
+                if len(data) == 1:
                     label.config(text=gesture_name_for(data[0]))
+                elif data:
+                    label.config(text=data.decode("utf-8", errors="replace"))
         except BlockingIOError:
             pass
         root.after(20, poll)
